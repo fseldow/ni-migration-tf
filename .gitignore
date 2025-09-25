@@ -1,0 +1,47 @@
+# Terraform files
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!terraform.tfvars.example
+
+# Crash log files
+crash.log
+crash.*.log
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+/tmp/
+
+# SSH keys (if generated locally)
+*.pem
+*.key
+migration-key*
+id_rsa*
+
+# Backup files
+*.backup
+*.bak
+
+# Editor temp files
+.*.tmp
+.*.swp
+
+# Local environment files
+.env
+.envrc
