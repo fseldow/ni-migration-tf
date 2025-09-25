@@ -1,0 +1,98 @@
+# Example Kubernetes manifests for testing migration
+
+# Test namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: test-migration
+  labels:
+    purpose: migration-testing
+
+---
+# Test deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app
+  namespace: test-migration
+  labels:
+    app: test-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: test-app
+  template:
+    metadata:
+      labels:
+        app: test-app
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.21
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+
+---
+# Test service
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-service
+  namespace: test-migration
+spec:
+  selector:
+    app: test-app
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+  type: ClusterIP
+
+---
+# Test ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-config
+  namespace: test-migration
+data:
+  config.yaml: |
+    app:
+      name: "test-application"
+      version: "1.0.0"
+      debug: false
+
+---
+# Test Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: test-secret
+  namespace: test-migration
+type: Opaque
+data:
+  username: dGVzdHVzZXI=  # testuser
+  password: dGVzdHBhc3N3b3Jk  # testpassword
+
+---
+# Test PersistentVolumeClaim
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-pvc
+  namespace: test-migration
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: gp3
