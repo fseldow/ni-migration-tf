@@ -12,13 +12,13 @@ resource "azapi_update_resource" "update_artifact_source" {
 }
 
 resource "azapi_resource_action" "reimage_nodepool" {
-  for_each = toset(var.agentpool_names)
+  for_each    = toset(var.agentpool_names)
   type        = "Microsoft.ContainerService/managedClusters/agentPools@2025-05-01"
   resource_id = "${azapi_update_resource.update_artifact_source.id}/agentPools/${each.key}"
   action      = "upgradeNodeImageVersion"
   method      = "POST"
-  body        = "{}"
-  depends_on = [azapi_update_resource.update_artifact_source]
+  body        = {}
+  depends_on  = [azapi_update_resource.update_artifact_source]
 }
 
 resource "azapi_update_resource" "update_outbound_type" {
@@ -31,7 +31,7 @@ resource "azapi_update_resource" "update_outbound_type" {
         artifactSource = "Cache"
       }
       networkProfile = {
-        outboundType    = "none"
+        outboundType = "none"
       }
     }
   }
