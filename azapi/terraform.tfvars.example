@@ -1,0 +1,8 @@
+subscription_id     = "00000000-0000-0000-0000-000000000000"
+resource_group_name = "my-rg"
+resource_name       = "my-aks-cluster"
+
+# Must list EVERY agent pool. Any pool omitted here is never reimaged and
+# will not be able to pull images once outboundType becomes "none".
+#   ./scripts/migrate.sh pools
+agentpool_names = ["agentpool"]

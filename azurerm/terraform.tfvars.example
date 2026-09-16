@@ -1,0 +1,14 @@
+subscription_id         = "12015272-f077-4945-81de-a5f607d067e1"
+resource_group_name     = "ni-test-rg"
+resource_group_location = "westcentralus"
+resource_name           = "myPrivateAKSCluster"
+agentpool_names         = ["agentpool"]
+
+# Must match the cluster's CURRENT outboundType, otherwise stage 0 is not a no-op.
+pre_migration_outbound_type = "loadBalancer"
+
+# "none" or "block"
+target_outbound_type = "none"
+
+# Bump this 0 -> 1 -> 2, one apply at a time.
+migration_stage = 0

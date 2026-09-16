@@ -1,0 +1,7 @@
+# Shell scripts must be LF. A CRLF checkout on Windows makes them fail with
+# "bad interpreter: /usr/bin/env bash^M" under WSL / Git Bash.
+*.sh text eol=lf
+
+*.tf   text eol=lf
+*.hcl  text eol=lf
+*.md   text eol=lf
