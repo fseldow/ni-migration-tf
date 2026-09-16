@@ -1,47 +1,19 @@
-# ni-migration-azurerm
+# ni-migration-tf (azurerm implementation)
 
-Migrates an **existing** AKS cluster to [network isolated](https://learn.microsoft.com/azure/aks/concepts-network-isolated)
-using `azurerm_kubernetes_cluster` instead of `azapi_update_resource`.
+Migrates an **existing** AKS cluster to network isolated using
+`azurerm_kubernetes_cluster` instead of `azapi_update_resource`.
 
-This is the azurerm rewrite of [`fseldow/ni-migration-tf`](https://github.com/fseldow/ni-migration-tf).
+See the [repo root README](../README.md) for how this compares to
+[`../azapi`](../azapi), and read that comparison before committing to this
+route — it is substantially more work.
 
-## Why this exists, and why it is not obviously better
-
-The original repo drives the migration with three `azapi` resources. That works,
-and it is *surgical*: `azapi_update_resource` does a GET, merges only the fields
-you named, and PUTs the result. You never have to describe the rest of the cluster.
-
-`azurerm_kubernetes_cluster` always sends a **full PUT built from your HCL**.
-That buys you real drift detection, but it means you must first describe the
-entire existing cluster accurately. Get a field wrong and you silently reset it;
-get a **ForceNew** field wrong and Terraform proposes deleting your cluster.
-
-> **Pick azurerm if** this config will be the long-term source of truth for the cluster.
-> **Stay on azapi if** this is a one-shot migration tool. You are not being rewarded
-> for the import work.
-
-## What azurerm still cannot do
-
-| Migration step | Mechanism here |
-|---|---|
-| 1. `bootstrapProfile.artifactSource = Cache` | ✅ `azurerm` — `bootstrap_profile.artifact_source` |
-| 2. `upgradeNodeImageVersion` on each pool | ❌ **`azapi_resource_action`** — see below |
-| 3. `networkProfile.outboundType = none` | ✅ `azurerm` — `network_profile.outbound_type` |
-
-`node_image_version` is a **read-only computed** attribute in azurerm and there is
-no on-demand reimage resource. `node_os_upgrade_channel = "NodeImage"` only schedules
-an *eventual* upgrade, which is not deterministic enough when step 3 removes egress.
-
-So one `azapi_resource_action` survives in `reimage.tf`. It is a `POST` action, not
-a `PUT`, so it carries none of the full-body risk.
-
-**You cannot get to zero azapi resources for this scenario.**
+All commands below are run from the **repo root**.
 
 ## Why three applies
 
-A single `azurerm_kubernetes_cluster` resource is PUT at most once per apply, so
-"change A → reimage → change B" cannot be expressed in one graph. A `migration_stage`
-variable splits it:
+A single `azurerm_kubernetes_cluster` resource is PUT at most once per apply,
+so "change A → reimage → change B" cannot be expressed in one graph. A
+`migration_stage` variable splits it:
 
 | stage | cluster PUT | reimage | meaning |
 |---|---|---|---|
@@ -49,43 +21,68 @@ variable splits it:
 | `1` | `artifactSource = Cache` | ✅ runs | nodes move onto the cached image |
 | `2` | `outboundType = none` | (already done) | egress removed |
 
-> ⚠️ **Never skip straight to stage 2.** Nodes that have not been reimaged lose
-> the ability to pull images the moment egress disappears.
+> [!WARNING]
+> Never skip straight to stage 2. Nodes that have not been reimaged lose the
+> ability to pull images the moment egress disappears. `migrate.sh apply`
+> enforces this by reading the stage recorded in Terraform state, but do not
+> rely on that alone — understand the ordering.
 
-## Setup
+## Step 0 — generate the cluster config
 
-### Step 0 — generate the cluster config (do not hand-write it)
+`cluster.tf` ships a **placeholder scaffold** so the module parses. It is
+almost certainly not your cluster, and applying it would reset real settings.
 
-`cluster.tf` ships a **placeholder scaffold** so the module parses. It is almost
-certainly not your cluster. Replace it:
-
-```powershell
-cp terraform.tfvars.example terraform.tfvars   # then edit it
-mv cluster.tf cluster.tf.scaffold              # get it out of the way
-
-terraform init
-terraform plan "-generate-config-out=generated.tf"
+```bash
+cp azurerm/terraform.tfvars.example azurerm/terraform.tfvars   # then edit
+./scripts/migrate.sh pools        # confirm agentpool_names lists every pool
+./scripts/migrate.sh bootstrap
 ```
 
-That plan **will fail**. Terraform's config generator emits a config azurerm
-rejects. Reproduced against a real cluster on azurerm v5.5.0 / Terraform v1.16.2:
+`bootstrap` does the whole generation dance for you:
+
+1. Stages an **isolated scratch workspace** containing only a provider block
+   and an `import` block. This cannot be done in `azurerm/` itself: config
+   generation requires the target resource to be *undeclared*, but `outputs.tf`
+   and `reimage.tf` both reference `azurerm_kubernetes_cluster.this`. It also
+   means your real directory and its state are never touched by this step.
+2. Runs `terraform plan -generate-config-out=generated.tf`.
+3. Repairs the result with
+   [`scripts/normalize-generated.sh`](./scripts/normalize-generated.sh) — see
+   below for why that is necessary.
+4. **Verifies** the repaired config plans clean against the live cluster before
+   handing it to you.
+5. Copies it out to `azurerm/generated.tf`.
+
+### Why the generated config has to be repaired
+
+Terraform's config generator emits a config that azurerm rejects. All three of
+these were reproduced against a real cluster on azurerm v5.5.0 / Terraform
+v1.16.2:
 
 1. `outbound_ip_address_ids = []` and `outbound_ip_prefix_ids = []` are emitted
-   next to `managed_outbound_ip_count`, which they `ConflictsWith`.
-2. Optional numerics are emitted as literal `0`, below their validation floors
-   (`min_count`/`max_count` ≥ 1, `idle_timeout_in_minutes` ≥ 4, `managed_outbound_ipv6_count` ≥ 1).
-3. Two residual cosmetic diffs (`idle_timeout_in_minutes 0 → 30`,
-   `node_provisioning_profile.default_node_pools null → "Auto"`).
+   next to `managed_outbound_ip_count`, which they `ConflictsWith`. They must be
+   **deleted**, not set to `null`.
+2. Optional numerics are emitted as literal `0`, below their validation floors:
+   `min_count`/`max_count` ≥ 1, `idle_timeout_in_minutes` ≥ 4,
+   `managed_outbound_ipv6_count` ≥ 1.
+3. Two residual cosmetic diffs remain afterwards
+   (`idle_timeout_in_minutes 0 → 30`, `default_node_pools null → "Auto"`).
 
-All three are fixed for you:
+`normalize-generated.sh` fixes 1 and 2, and handles 3 by injecting a
+`lifecycle` block. You can also run it standalone:
 
-```powershell
-.\scripts\normalize-generated.ps1 -Path generated.tf
-terraform plan     # -> Plan: 1 to import, 0 to add, 0 to change, 0 to destroy.
+```bash
+cd azurerm
+terraform plan -generate-config-out=generated.tf
+./scripts/normalize-generated.sh generated.tf
 ```
 
-Now fold the normalised resource body back into `cluster.tf`, re-adding the two
-migration hooks (they are marked `MIGRATION BLOCK` in the scaffold):
+### The manual part
+
+This is deliberately not automated. Replace the placeholder body of
+`azurerm/cluster.tf` with the resource body from `azurerm/generated.tf`, then
+re-add the two migration hooks — they are marked `MIGRATION BLOCK` in the
+scaffold:
 
 ```hcl
 bootstrap_profile {
@@ -98,53 +95,53 @@ network_profile {
 }
 ```
 
-Delete `generated.tf` and `cluster.tf.scaffold`.
-
-### Gate
-
-```bash
-terraform plan -var migration_stage=0
-```
-
-**Do not proceed until this reports `0 to add, 0 to change, 0 to destroy`.**
-A non-empty diff here means your config disagrees with the live cluster, and
-applying it will change things you did not intend.
-
-### Step 1 — baseline
+Keep the generated `lifecycle` block. Then delete `generated.tf` — it declares
+`azurerm_kubernetes_cluster.this` as well, so leaving it in place is a
+duplicate-resource error:
 
 ```bash
-terraform apply -var migration_stage=0
+rm azurerm/generated.tf
 ```
 
-### Step 2 — Cache + reimage
+## Gate
 
 ```bash
-terraform apply -var migration_stage=1
+./scripts/migrate.sh plan 0
 ```
 
-Then verify nodes are healthy and pulling from the managed ACR before continuing.
+**Do not proceed until this reports `0 to add, 0 to change, 0 to destroy`**
+(an import line is fine). A non-empty diff means your config disagrees with the
+live cluster, and applying it will change things you did not intend.
 
-### Step 3 — remove egress
+`apply 0` re-checks this itself and refuses to run if it is not a no-op.
+
+## Steps 1–3
 
 ```bash
-terraform apply -var migration_stage=2
+./scripts/migrate.sh apply 0      # import + baseline
+./scripts/migrate.sh apply 1      # artifactSource=Cache, then reimage every pool
+./scripts/migrate.sh verify       # confirm nodes are healthy on the new image
+./scripts/migrate.sh apply 2      # outboundType=none
 ```
+
+`./scripts/migrate.sh status` shows the applied stage and the live cluster's
+current `artifactSource` / `outboundType` at any point.
 
 ## Gotchas
 
 - **`prevent_destroy = true` is load-bearing.** It converts a misconfigured
-  ForceNew field from "cluster deleted" into "plan-time error". Do not remove it.
+  ForceNew field from "cluster deleted" into a plan-time error. Do not remove it.
 - **The managed ACR is not garbage collected.** With `artifact_source = "Cache"`
   and an explicit `outbound_type`, `terraform destroy` leaves the managed ACR,
   its private endpoint, and private DNS zone behind. Clean them up manually.
-- **Pin `migration_stage` in `terraform.tfvars`** so nobody forgets `-var` and
-  silently reverts a stage.
+- **Pin `migration_stage` in `terraform.tfvars`** so a bare `terraform apply`
+  outside the script cannot silently revert a stage.
 - **`azapi_resource_action` has no drift detection.** Its read is a no-op; it
-  fires once at create and never re-runs. That is intentional here — you do not
-  want a node pool reimage on every apply.
+  fires once at create and never re-runs. That is intentional — you do not want
+  a node pool reimage on every apply.
 - Provider floors: `bootstrap_profile` needs azurerm **≥ 4.44.0**; this config
-  targets the **v5** line and requires `node_provisioning_profile`, which is a
-  required block in v5.
+  targets the **v5** line, which additionally requires the
+  `node_provisioning_profile` block.
 
 ## Layout
 
@@ -156,11 +153,14 @@ import.tf       import block for the existing cluster
 cluster.tf      THE CLUSTER (replace the scaffold, see Step 0)
 reimage.tf      the one remaining azapi resource
 outputs.tf      includes a next_step hint
-scripts/        normalize-generated.ps1
+scripts/        normalize-generated.sh
 ```
 
 ## Verified against
 
 Terraform v1.16.2 · azurerm v5.5.0 · azapi v2.12.0 · AKS API `2025-05-01`.
-`terraform validate` passes; the import + normalize flow was confirmed to reach
-`0 to add, 0 to change, 0 to destroy` against a live AKS cluster.
+
+`terraform validate` passes. `bootstrap` was run end-to-end against a live AKS
+cluster and reached `0 to add, 0 to change, 0 to destroy`; stage 1 and stage 2
+plans were confirmed to produce exactly the intended `artifact_source` and
+`outbound_type` diffs plus the reimage action. Nothing was applied.
